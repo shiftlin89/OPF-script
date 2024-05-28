@@ -1,0 +1,232 @@
+import casadi.*
+
+%use casadi, SOCP modeling
+
+%Experience
+
+     * A relative high accuracy for active power , however, the reactive and the voltage have a very bad quality compared with the AC OPF result
+
+%% define named indices into bus, gen, branch matrices
+[PQ, PV, REF, NONE, BUS_I, BUS_TYPE, PD, QD, GS, BS, BUS_AREA, VM, ...
+    VA, BASE_KV, ZONE, VMAX, VMIN, LAM_P, LAM_Q, MU_VMAX, MU_VMIN] = idx_bus;
+[F_BUS, T_BUS, BR_R, BR_X, BR_B, RATE_A, RATE_B, RATE_C, ...
+    TAP, SHIFT, BR_STATUS, PF, QF, PT, QT, MU_SF, MU_ST, ...
+    ANGMIN, ANGMAX, MU_ANGMIN, MU_ANGMAX] = idx_brch;
+[GEN_BUS, PG, QG, QMAX, QMIN, VG, MBASE, GEN_STATUS, PMAX, PMIN, ...
+    MU_PMAX, MU_PMIN, MU_QMAX, MU_QMIN, PC1, PC2, QC1MIN, QC1MAX, ...
+    QC2MIN, QC2MAX, RAMP_AGC, RAMP_10, RAMP_30, RAMP_Q, APF] = idx_gen;
+
+
+
+
+% Load MATPOWER case
+define_constants;  % Defines MATPOWER constants for indexing
+mpc = loadcase('case39');  % Example: IEEE 30-bus test case
+
+
+mpc.gen(9:10,9) = 10000;
+mpc.gen(9:10,10) = 0;
+
+mpc.gencost(9:10,5:7) = mpc.gencost(9:10,5:7)*0;
+
+
+%
+rc = runopf(mpc)
+
+
+
+[bus, branch, gen ] = deal(mpc.bus, mpc.branch, mpc.gen);
+
+% Number of buses and lines
+nb = size(mpc.bus, 1);     % Number of buses
+nl = size(mpc.branch, 1);  % Number of branches
+ng = size(mpc.gen, 1);     % Number of generators
+
+
+% CasADi variables for generation at each generator
+P_g = MX.sym('P_g', ng, 1);  % Real power generation
+Q_g = MX.sym('Q_g', ng, 1);  % Reactive power generation
+
+% Variables for squared voltage magnitudes at each bus
+uii = MX.sym('uii', nb, 1);  % Squared voltage magnitude at each bus
+
+% Voltage angle difference variables for each branch
+Rij = MX.sym('Rij', nl, 1);  % Cosine of voltage angle differences
+Iij = MX.sym('Iij', nl, 1);  % Sine of voltage angle differences
+
+% p_line_f = MX.sym('pijf', nl, 1);
+% q_line_f = MX.sym('qijf', nl, 1);
+% p_line_t = MX.sym('pijt', nl, 1);
+% q_line_t = MX.sym('qint', nl, 1);
+
+% Objective function: Minimize generation cost (simplified quadratic cost)
+Cost = sum(mpc.gencost(:, 5) .* (P_g*100).^2 + mpc.gencost(:, 6) .* (P_g*100) + mpc.gencost(:, 7))/10000.0;
+% Cost = 0;
+% Constraints
+constraints = [];
+%bound
+lbg = [];
+ubg = [];
+
+%     
+% % Branch contributions to bus i
+% for k = 1:nl
+%     fbus = mpc.branch(k, 1);
+%     tbus = mpc.branch(k, 2);
+% 
+%     yij = 1/(mpc.branch(k,3)+1j*mpc.branch(k,4));
+%     gij = real(yij);
+%     bij = imag(yij);
+%     %
+% %     if mpc.branch(k, 1) == i 
+% %             sum_P = sum_P + (G(fbus, tbus) * cij(k) - B(fbus, tbus) * sij(k));
+% %             sum_Q = sum_Q + (-B(fbus, tbus) * cij(k) - G(fbus, tbus) * sij(k));
+% 
+% %         p_line_f(k) =  p_line_f(k) + ( gij*uii(fbus) - gij*Rij(k) + bij*Iij(k) );
+% %         p_line_f(k) =  p_line_f(k) + ( bij*uii(fbus) - bij*Rij(k) - gij*Iij(k) );
+%         
+%         constraints = [constraints; p_line_f(k) -  ( ( gij*uii(fbus) - gij*Rij(k) + -bij*Iij(k) )) ];
+%         lbg = [lbg; 0.0];
+%         ubg = [ubg; 0.0];
+%     
+%         constraints = [constraints; q_line_f(k) -  ( ( -bij*uii(fbus) + bij*Rij(k) - gij*Iij(k) )) ];
+%         lbg = [lbg; 0.0];
+%         ubg = [ubg; 0.0];
+% %     end
+% 
+%     %
+% %     if  mpc.branch(k, 2) == i
+% %             sum_P = sum_P + (G(tbus, fbus) * cij(k) - B( tbus, fbus) * (-sij(k)));
+% %             sum_Q = sum_Q + (-B(tbus, fbus) * cij(k) - G( tbus, fbus) * (-sij(k)));
+% 
+%        constraints = [constraints;  p_line_t(k) - ( ( gij*uii(tbus) - gij*Rij(k) + -bij*(-Iij(k))))  ];
+%        lbg = [lbg; 0.0];
+%        ubg = [ubg; 0.0];
+%     
+%        constraints = [constraints;  q_line_t(k) - ( ( -bij*uii(tbus) + bij*Rij(k) - gij*(-Iij(k))))  ];
+%        lbg = [lbg; 0.0];
+%        ubg = [ubg; 0.0];
+% %     end
+% end
+
+
+
+
+
+% Power balance constraints
+for i = 1:nb
+    Pd = mpc.bus(i, PD)/100.0;
+    Qd = mpc.bus(i, QD)/100.0;
+    
+    sum_P = 0;
+    sum_Q = 0;
+    
+    % Add generator contributions at bus i
+    gen_idx = find(mpc.gen(:, GEN_BUS) == i);
+    for idx = gen_idx'
+        sum_P = sum_P - P_g(idx);
+        sum_Q = sum_Q - Q_g(idx);
+    end
+    
+    % Branch contributions to bus i
+    for k = 1:nl
+        fbus = mpc.branch(k, 1);
+        tbus = mpc.branch(k, 2);
+        
+        yij = 1/(mpc.branch(k,3)+1j*mpc.branch(k,4));
+        gij = real(yij);
+        bij = imag(yij);
+        %
+        if mpc.branch(k, 1) == i 
+            sum_P = sum_P + (gij*uii(fbus) - gij*Rij(k) + -bij*Iij(k));
+            sum_Q = sum_Q + ( -bij*uii(fbus) + bij*Rij(k) - gij*Iij(k));
+            
+%             sum_P = sum_P + p_line_f(k);
+%             sum_Q = sum_Q + q_line_f(k);
+        end
+        
+        %
+        if  mpc.branch(k, 2) == i
+            sum_P = sum_P + (gij*uii(tbus) - gij*Rij(k) + -bij*(-Iij(k)));
+            sum_Q = sum_Q + ( -bij*uii(tbus) + bij*Rij(k) - gij*(-Iij(k)));
+            
+%             sum_P = sum_P + p_line_t(k);
+%             sum_Q = sum_Q + q_line_t(k);
+        end
+    end
+    
+    constraints = [constraints; sum_P + Pd ];
+    lbg = [lbg; 0.0];
+    ubg = [ubg; 0.0];
+    
+    constraints = [constraints; sum_Q + Qd ];
+    lbg = [lbg; 0.0];
+    ubg = [ubg; 0.0];
+end
+
+
+% Voltage magnitude constraints
+% for i = 1:nb
+%     constraints = [constraints; {cii(i) >= bus(i, VMIN)^2*0}];
+%     constraints = [constraints; {cii(i) <= bus(i, VMAX)^2*1}];
+% end
+
+constraints = [constraints; uii - bus(:, VMAX).^2  ];
+lbg = [lbg; -inf*ones(nb,1)];
+ubg = [ubg; zeros(nb,1)];
+    
+constraints = [constraints; bus(:, VMIN).^2 - uii  ];
+lbg = [lbg; -inf*ones(nb,1)];
+ubg = [ubg; zeros(nb,1)];
+
+% Branch angle and voltage relations
+for k = 1:nl
+    i = branch(k, 1);
+    j = branch(k, 2);
+    constraints = [constraints; Rij(k)^2 + Iij(k)^2 - uii(i)*uii(j) ];
+    lbg = [lbg; -inf];
+    ubg = [ubg; 0.0];
+end
+
+disp(['Number of variables: ', num2str(length(vertcat(P_g, Q_g, uii, Rij, Iij)))]);
+disp(['Number of constraints: ', num2str(length(constraints))]);
+
+
+% Solver options
+opts = struct('ipopt', struct('print_level', 5));
+prob = struct;
+prob.f = Cost;
+prob.x = [P_g; Q_g; uii; Rij; Iij];
+prob.g = constraints;
+% prob = struct('f', Cost, 'x', vertcat(P_g, Q_g, cii, cij, sij), 'g', vertcat(constraints{:}));
+solver = nlpsol('solver', 'ipopt', prob, opts);
+
+
+
+
+x0 = [mpc.gen(:,2)/100.0; mpc.gen(:,3)/100.0; ones(nb,1); zeros(nl,1); zeros(nl,1);  ];
+
+xlb = [mpc.gen(:,10)/100.0;  mpc.gen(:,5)/100.0; 0.8*ones(nb,1); 0.4*ones(nl,1);      -1.05*ones(nl,1);  ];
+xub = [mpc.gen(:,9)/100.0;   mpc.gen(:,4)/100.0; 1.4*ones(nb,1); 1.21*ones(nl,1);      1.04*ones(nl,1);  ];
+
+% Solve the NLP
+sol = solver('x0', x0,'lbx', xlb, 'ubx', xub, 'lbg', lbg, 'ubg', ubg);
+% sol = solver('x0', x0,'lbx', xlb, 'ubx', xub);
+
+
+solx = full(sol.x(1:end));
+P_g_val = solx(1:ng)
+Q_g_val = solx(ng+(1:ng))
+cii_val = solx(ng*2+(1:nb))
+cij_val = solx(ng*2+nb+(1:nl))
+sij_val = solx(ng*2+nb+nl+(1:nl))
+obj_val = full(sol.f)
+
+% Display results
+disp('Optimal Power Generation (P_g):');
+% disp(full(sol.x(1:end)));  % Display only generator outputs
+
+
+% for i=1:size(prob.g,1)
+%     disp(prob.g(i))
+% end
